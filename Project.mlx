@@ -1,0 +1,96 @@
+% Wireless Audio Transmission with Noise Reduction
+% Project based on MATLAB, Signal Processing, and Wireless Comm skills
+
+% Load audio file and limit to 10 seconds to reduce memory
+[audio, Fs] = audioread('Audio.mp3');  % Load MP3 file
+max_duration = 10;  % Limit to 10 seconds
+max_samples = min(floor(max_duration * Fs), length(audio));
+audio = audio(1:max_samples, 1)';  % Use first channel, truncate
+
+% Downsample to reduce memory (optional, e.g., to 8 kHz)
+if Fs > 8000
+    [P, Q] = rat(8000/Fs);  % Resampling ratio
+    audio = resample(audio, P, Q);
+    Fs = 8000;  % Update sampling rate
+end
+
+% Apply low-pass filter
+cutoff = 0.5;  % Normalized cutoff frequency
+[b, a] = butter(5, cutoff, 'low');  % 5th-order Butterworth
+filtered_audio = filtfilt(b, a, audio);  % Zero-phase filtering
+
+% Plot original and filtered audio
+figure(1);
+subplot(2,1,1); plot(audio); title('Original Audio');
+subplot(2,1,2); plot(filtered_audio); title('Preprocessed Audio');
+
+% Process audio in chunks to reduce memory
+chunk_size = 10000;  % Process 10,000 samples at a time
+num_samples = length(filtered_audio);
+num_chunks = ceil(num_samples / chunk_size);
+received_audio_filt = zeros(1, num_samples);  % Preallocate
+
+for chunk_idx = 1:num_chunks
+    % Extract chunk
+    start_idx = (chunk_idx - 1) * chunk_size + 1;
+    end_idx = min(chunk_idx * chunk_size, num_samples);
+    audio_chunk = filtered_audio(start_idx:end_idx);
+    
+    % Quantize to 8-bit
+    min_val = min(audio_chunk);
+    max_val = max(audio_chunk);
+    if max_val == min_val  % Avoid division by zero
+        max_val = min_val + 1;
+    end
+    audio_scaled = round((audio_chunk - min_val) / (max_val - min_val) * 255);  % 0-255
+    
+    % Convert to bitstream
+    bitstream = de2bi(audio_scaled, 8, 'left-msb')';  % To bits
+    bitstream = bitstream(:)';  % Flatten
+
+    SNR_dB = 15;  % Adjust SNR
+    signal_power = var(bitstream);
+    noise_var = signal_power / (10^(SNR_dB/10));
+    symbols = 2 * bitstream - 1;  % BPSK: 0 -> -1, 1 -> 1
+    noise = sqrt(noise_var) * randn(size(symbols));  % AWGN
+    received_symbols = symbols + noise;
+    
+
+    % Demodulate BPSK
+    received_bitstream = received_symbols > 0;  % Decision threshold at 0
+    
+    % Ensure bitstream length is compatible
+    num_bits = length(received_bitstream);
+    num_samples_chunk = floor(num_bits / 8);
+    received_bitstream = received_bitstream(1:num_samples_chunk*8);  % Truncate
+    
+    % Reconstruct audio
+    received_vector = bi2de(reshape(received_bitstream, 8, [])', 'left-msb');
+    received_audio = (received_vector / 255) * (max_val - min_val) + min_val;
+    
+    % Apply post-demod filter
+    received_audio_filt(start_idx:start_idx+length(received_audio)-1) = filtfilt(b, a, received_audio);
+end
+
+% Compute Bit Error Rate (BER) for last chunk
+ber = mean(bitstream(1:length(received_bitstream)) ~= received_bitstream);
+disp(['Bit Error Rate (last chunk): ', num2str(ber)]);
+
+% Compute SNR (post-reconstruction)
+error = audio(1:length(received_audio_filt)) - received_audio_filt;
+snr_calc = 10 * log10(var(audio(1:length(received_audio_filt))) / var(error));
+disp(['Calculated SNR: ', num2str(snr_calc), ' dB']);
+
+% Plot received audio
+figure(2);
+subplot(2,1,1); plot(received_audio); title('Received Audio (Last Chunk, Noisy)');
+subplot(2,1,2); plot(received_audio_filt); title('Filtered Received Audio');
+
+% Spectrogram for visual
+figure(3);
+spectrogram(received_audio_filt, 256, 250, 256, Fs, 'yaxis');
+title('Spectrogram of Received Audio');
+
+% Play sounds (uncomment to hear)
+% sound(audio, Fs); pause(length(audio)/Fs + 1);
+% sound(received_audio_filt, Fs);
